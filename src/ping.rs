@@ -4,8 +4,12 @@ use pnet::packet::icmp::*;
 use pnet::packet::Packet;
 use pnet::transport;
 use rand::random;
-use snafu::{ResultExt, Snafu};
-use std::{io, net, net::IpAddr, time::Duration};
+use snafu::{OptionExt, ResultExt, Snafu};
+use std::{
+    io, net,
+    net::{IpAddr, Ipv4Addr},
+    time::Duration,
+};
 
 #[derive(Debug, Snafu)]
 pub enum PingError {
@@ -37,21 +41,29 @@ pub struct Pinger {
 }
 
 #[derive(Debug)]
-pub struct Echo {
-    pub identifier: u16,
-    pub sequence_number: u16,
-    pub payload: Vec<u8>,
+pub enum Reply {
+    EchoReply {
+        from: Ipv4Addr,
+        sequence_number: u16,
+        payload: Vec<u8>,
+    },
+    TimeToLiveExceeded {
+        from: Ipv4Addr,
+    },
+    Timeout,
 }
 
 impl Pinger {
-    pub fn open() -> PingResult<Pinger> {
+    pub fn open(ttl: u8) -> PingResult<Pinger> {
         use pnet::packet::ip::IpNextHeaderProtocols::Icmp;
         use pnet::transport::{TransportChannelType::Layer4, TransportProtocol::Ipv4};
         use pnet::transport::{TransportReceiver, TransportSender};
 
         let proto = Layer4(Ipv4(Icmp));
-        let (tx, rx): (TransportSender, TransportReceiver) =
+        let (mut tx, rx): (TransportSender, TransportReceiver) =
             transport::transport_channel(4096, proto).context(ChannelOpen)?;
+
+        tx.set_ttl(ttl).context(ChannelOpen)?; // set the packet TTL
 
         // Generate a random identifier for this pinger.
         let identifier: u16 = random();
@@ -61,7 +73,7 @@ impl Pinger {
 
     pub fn send(
         &mut self,
-        addr: net::Ipv4Addr,
+        addr: Ipv4Addr,
         sequence_number: u16,
         payload: &[u8],
     ) -> PingResult<usize> {
@@ -87,7 +99,7 @@ impl Pinger {
             .context(IcmpSend)
     }
 
-    pub fn recv(&mut self, timeout: Duration) -> PingResult<Option<(net::Ipv4Addr, u16, Vec<u8>)>> {
+    pub fn recv(&mut self, timeout: Duration) -> PingResult<Reply> {
         use pnet::transport::icmp_packet_iter;
 
         let mut rx_queue = icmp_packet_iter(&mut self.rx);
@@ -109,7 +121,7 @@ impl Pinger {
                         IcmpTypes::EchoReply => {
                             let reply = EchoReplyPacket::new(&packet.packet()).context(
                                 MalformedPacket {
-                                    packet: clone_packet(packet),
+                                    packet: clone_packet(&packet),
                                 },
                             )?;
 
@@ -118,20 +130,23 @@ impl Pinger {
                                 continue;
                             }
 
-                            Ok(Some((
-                                addr,
-                                reply.get_sequence_number(),
-                                Vec::from(reply.payload()),
-                            )))
+                            Ok(Reply::EchoReply {
+                                from: addr,
+                                sequence_number: reply.get_sequence_number(),
+                                payload: Vec::from(reply.payload()),
+                            })
                         }
+
+                        IcmpTypes::TimeExceeded => Ok(Reply::TimeToLiveExceeded { from: addr }),
+
                         _ => Err(PingError::UnexpectedPacket {
-                            packet: clone_packet(packet),
+                            packet: clone_packet(&packet),
                         }),
                     }
                 }
 
                 // We have a timeout.
-                Ok(None) => Ok(None),
+                Ok(None) => Ok(Reply::Timeout),
 
                 // Some error has happened when receiving the packet.
                 Err(err) => Err(PingError::IcmpRecv { source: err }),
@@ -140,7 +155,7 @@ impl Pinger {
     }
 }
 
-fn clone_packet<'a>(packet: IcmpPacket<'a>) -> IcmpPacket<'static> {
+fn clone_packet<'a>(packet: &IcmpPacket<'a>) -> IcmpPacket<'static> {
     let backing_buf = packet.packet();
     let cloned: Vec<u8> = backing_buf.into();
     IcmpPacket::owned(cloned).unwrap()
