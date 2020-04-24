@@ -9,3 +9,4 @@ pnet = "0.25.0"
 snafu = "0.6.6"
 rand = "0.7.3"
 clap = { git = "https://github.com/clap-rs/clap/", rev = "6febd2b582c632433ab5963a884bdb60e854b26e"}
+resolve = "0.2.0"

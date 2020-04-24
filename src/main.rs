@@ -1,6 +1,6 @@
 use clap::Clap;
-use std::env;
-use std::net::Ipv4Addr;
+use resolve::resolver::{resolve_addr, resolve_host};
+use std::net::{IpAddr, Ipv4Addr};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -29,12 +29,37 @@ struct Args {
 fn main() {
     let args = Args::parse();
 
-    let addr: Ipv4Addr = args
-        .host
-        .parse()
-        .expect("wping: could not parse IP address");
+    // Try to parse host as ipv4
+    let parsed_ip: Result<Ipv4Addr, _> = args.host.parse();
+    let (host_ip, host_name): (Ipv4Addr, Option<String>) = match parsed_ip {
+        // The host is an ip address, so reverse-resolve its domain
+        Ok(addr) => (addr, resolve_addr(&IpAddr::V4(addr)).ok()),
 
-    println!("PING {addr} ({addr}) 56(84) bytes of data.", addr = addr);
+        // The host is a domain, so resolve its IP
+        Err(_) => {
+            // TODO: gracefully handle failures
+            let addresses = resolve_host(&args.host).expect("name not known");
+
+            // Take the first address.
+            let addr = addresses
+                .filter_map(|ad| match ad {
+                    IpAddr::V4(x) => Some(x), // only take ipv4 addresses
+                    _ => None,
+                })
+                .next()
+                .expect("could not find IP for name");
+
+            (addr, Some(args.host))
+        }
+    };
+
+    let host_description = host_name.unwrap_or(format!("{}", host_ip));
+
+    println!(
+        "PING {desc} ({ip}) 56(84) bytes of data.",
+        desc = host_description,
+        ip = host_ip
+    );
 
     // Open the pinger
     let mut pinger = Pinger::open(args.ttl).unwrap();
@@ -46,7 +71,7 @@ fn main() {
     for seq in 0..args.count {
         let sent_time = Instant::now();
         count_sent += 1;
-        pinger.send(addr, seq, &[42; 56]).unwrap();
+        pinger.send(host_ip, seq, &[42; 56]).unwrap();
 
         let response = pinger.recv(Duration::from_millis(args.timeout));
 
@@ -82,7 +107,7 @@ fn main() {
     // Calculate some statistics
     let packet_loss: f64 = (count_sent - rtt_list.len() as u32) as f64 / count_sent as f64;
 
-    println!("--- {} ping statistics ---", addr);
+    println!("--- {} ping statistics ---", host_description);
     println!(
         "{} packets transmitted, {} received, {} errors, {:.2}% packet loss",
         count_sent,
