@@ -6,4 +6,5 @@ edition = "2018"
 
 [dependencies]
 pnet = "0.25.0"
-simple-error = "0.2"
+snafu = "0.6.6"
+rand = "0.7.3"

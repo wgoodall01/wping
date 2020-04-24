@@ -1,67 +1,76 @@
-use pnet::packet::icmp::echo_request::*;
-use pnet::packet::icmp::*;
-use pnet::packet::ip::IpNextHeaderProtocols::Icmp;
-use pnet::packet::Packet;
-use pnet::transport::TransportChannelType::Layer4;
-use pnet::transport::TransportProtocol::Ipv4;
-use pnet::transport::{icmp_packet_iter, transport_channel};
-use simple_error::{try_with, SimpleError};
+use rand::random;
 use std::env;
-use std::net::IpAddr;
+use std::net::Ipv4Addr;
+use std::thread::sleep;
+use std::time::{Duration, Instant};
 
-fn main() -> Result<(), SimpleError> {
+mod ping;
+use ping::*;
+
+fn main() {
     // Get the arguments
     let args: Vec<String> = env::args().collect();
 
     let dest_addr_str = match args.as_slice() {
         [_bin, ip, ..] => ip,
-        _ => {
-            println!("nope, you need args");
-            return Err("What".into());
-        }
+        _ => "1.1.1.1",
     };
-    let dest_addr = IpAddr::V4(dest_addr_str.parse().expect("could not parse IP address"));
+    let addr: Ipv4Addr = dest_addr_str
+        .parse()
+        .expect("wping: could not parse IP address");
 
-    println!("pinging addr={:?}", dest_addr);
+    println!("PING {addr} ({addr}) 56(84) bytes of data.", addr = addr);
 
-    // Set up the (tx,rx) ICMP transport
-    let protocol = Layer4(Ipv4(Icmp));
-    let (mut tx, mut rx) = try_with!(
-        transport_channel(4096 /* buffer size */, protocol),
-        "can't open transport channel"
-    );
-    println!("opened channel");
+    // Open the pinger
+    let mut pinger = Pinger::open().unwrap();
 
-    let mut rx_iter = icmp_packet_iter(&mut rx);
+    let mut rtt_list: Vec<u128> = Vec::new();
+    let mut count_sent: u32 = 0;
 
-    loop {
-        let req = make_echo_request();
-        println!("sending request: {:?}", req);
-        let sent_size = tx.send_to(req, dest_addr).unwrap();
-        println!("sent the ping. size={}", sent_size);
+    for seq in 0..5 {
+        let sent_time = Instant::now();
+        count_sent += 1;
+        pinger.send(addr, seq, &[42; 56]).unwrap();
 
-        match rx_iter.next() {
-            Ok((packet, addr)) => println!(
-                "Response from {:?}: {:?}\n\tpayload:{:?}",
-                addr,
-                packet,
-                packet.payload()
-            ),
-            Err(error) => println!("Got error: {:?}", error),
+        let response = pinger.recv(Duration::from_secs(10)).unwrap();
+
+        match response {
+            Some((addr, seq, _)) => {
+                // Bookkeeping for stats.
+                let rtt = sent_time.elapsed().as_millis();
+                rtt_list.push(rtt);
+
+                println!("64 bytes from {}: icmp_seq={} time={}", addr, seq, rtt)
+            }
+            None => println!("Request timed out."),
         }
+
+        sleep(Duration::from_secs(1));
     }
-}
 
-fn make_echo_request() -> EchoRequestPacket<'static> {
-    let buf: Vec<u8> = vec![0; MutableEchoRequestPacket::minimum_packet_size()];
-    let mut packet = MutableEchoRequestPacket::owned(buf).unwrap();
+    // Calculate some statistics
+    let rtt_min = rtt_list.iter().copied().min().unwrap();
+    let rtt_max = rtt_list.iter().copied().max().unwrap();
+    let rtt_total: u128 = rtt_list.iter().sum();
+    let rtt_avg: f64 = rtt_total as f64 / rtt_list.len() as f64;
+    let packet_loss: f64 = (count_sent - rtt_list.len() as u32) as f64 / count_sent as f64;
 
-    packet.set_icmp_type(IcmpTypes::EchoRequest);
-    packet.set_icmp_code(IcmpCodes::NoCode);
-    packet.set_identifier(0x0101);
-    packet.set_sequence_number(0x0101);
+    let rtt_rss: f64 = rtt_list
+        .iter()
+        .copied()
+        .map(|x| (x as f64 - rtt_avg).powi(2))
+        .sum();
+    let rtt_stdev = (rtt_rss as f64 / rtt_list.len() as f64).sqrt();
 
-    let echo_checksum = checksum(&IcmpPacket::new(packet.packet()).unwrap());
-    packet.set_checksum(echo_checksum);
-    packet.consume_to_immutable()
+    println!("--- {} ping statistics ---", addr);
+    println!(
+        "{} packets transmitted, {} received, {:.2}% packet loss",
+        count_sent,
+        rtt_list.len(),
+        packet_loss
+    );
+    println!(
+        "rtt min/avg/max/stdev = {}/{}/{}/{:.2}",
+        rtt_min, rtt_avg, rtt_max, rtt_stdev
+    );
 }
