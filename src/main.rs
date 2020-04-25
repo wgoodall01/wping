@@ -1,5 +1,6 @@
 use clap::Clap;
 use resolve::resolver::{resolve_addr, resolve_host};
+use snafu::{OptionExt, ResultExt, Snafu};
 use std::net::{IpAddr, Ipv4Addr};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -26,9 +27,36 @@ struct Args {
     host: String,
 }
 
+#[derive(Snafu, Debug)]
+enum CliError {
+    #[snafu(display("could not resolve: {}", source))]
+    ResolutionError { source: std::io::Error },
+
+    #[snafu(display("could not resolve Ipv4 address for host"))]
+    DnsIpv4Error,
+
+    #[snafu(display("could not open ICMP transport: {}", source))]
+    IcmpOpenError { source: PingError },
+
+    #[snafu(display("could not send echo request: {}", source))]
+    IcmpSendError { source: PingError },
+
+    #[snafu(display("could not recieve icmp response: {}", source))]
+    IcmpRecvError { source: PingError },
+}
+
 fn main() {
     let args = Args::parse();
+    match run_ping(args) {
+        Ok(_) => std::process::exit(0),
+        Err(err) => {
+            println!("{}", err);
+            std::process::exit(1);
+        }
+    }
+}
 
+fn run_ping(args: Args) -> Result<(), CliError> {
     // Try to parse host as ipv4
     let parsed_ip: Result<Ipv4Addr, _> = args.host.parse();
     let (host_ip, host_name): (Ipv4Addr, Option<String>) = match parsed_ip {
@@ -38,16 +66,16 @@ fn main() {
         // The host is a domain, so resolve its IP
         Err(_) => {
             // TODO: gracefully handle failures
-            let addresses = resolve_host(&args.host).expect("name not known");
+            let addresses = resolve_host(&args.host).context(ResolutionError)?;
 
             // Take the first address.
-            let addr = addresses
+            let addr: Ipv4Addr = addresses
                 .filter_map(|ad| match ad {
                     IpAddr::V4(x) => Some(x), // only take ipv4 addresses
                     _ => None,
                 })
                 .next()
-                .expect("could not find IP for name");
+                .context(DnsIpv4Error)?;
 
             (addr, Some(args.host))
         }
@@ -62,7 +90,7 @@ fn main() {
     );
 
     // Open the pinger
-    let mut pinger = Pinger::open(args.ttl).unwrap();
+    let mut pinger = Pinger::open(args.ttl).context(IcmpOpenError)?;
 
     let mut rtt_list: Vec<u128> = Vec::new();
     let mut count_sent: u32 = 0;
@@ -71,7 +99,9 @@ fn main() {
     for seq in 0..args.count {
         let sent_time = Instant::now();
         count_sent += 1;
-        pinger.send(host_ip, seq, &[42; 56]).unwrap();
+        pinger
+            .send(host_ip, seq, &[42; 56])
+            .context(IcmpSendError)?;
 
         let response = pinger.recv(Duration::from_millis(args.timeout));
 
@@ -85,9 +115,16 @@ fn main() {
                 let rtt = sent_time.elapsed().as_millis();
                 rtt_list.push(rtt);
 
+                // Reverse DNS lookup for the IP, to describe it in the log line
+                let domain = resolve_addr(&IpAddr::V4(from)).ok();
+                let desc = match domain {
+                    Some(name) => format!("{} ({})", name, from),
+                    None => format!("{}", from),
+                };
+
                 println!(
                     "64 bytes from {}: icmp_seq={} ttl={} time={}",
-                    from, sequence_number, args.ttl, rtt
+                    desc, sequence_number, args.ttl, rtt
                 )
             }
 
@@ -98,7 +135,7 @@ fn main() {
 
             Ok(Reply::Timeout) => println!("Request timed out."),
 
-            Err(err) => println!("error: {}", err),
+            Err(err) => return Err(CliError::IcmpRecvError { source: err }),
         }
 
         sleep(Duration::from_secs(1));
@@ -133,4 +170,6 @@ fn main() {
             rtt_min, rtt_avg, rtt_max, rtt_stdev
         );
     }
+
+    Ok(())
 }
