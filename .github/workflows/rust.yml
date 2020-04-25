@@ -1,0 +1,24 @@
+name: Rust CI
+
+on: [push]
+
+jobs:
+  check_clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v1
+      - run: rustup component add clippy
+      - uses: actions-rs/clippy-check@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          args: -p wping --all-features
+
+  build_linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v1
+      - run: cargo build --release --target x86_64-unknown-linux-gnu
+      - uses: actions/upload-artifact@v1.0.0
+        with:
+          name: wping_x86_64-unknown-linux-gnu
+          path: target/x86_64-unknown-linux-gnu/release/wping
