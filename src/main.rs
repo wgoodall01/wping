@@ -30,19 +30,19 @@ struct Args {
 #[derive(Snafu, Debug)]
 enum CliError {
     #[snafu(display("could not resolve: {}", source))]
-    ResolutionError { source: std::io::Error },
+    Resolution { source: std::io::Error },
 
     #[snafu(display("could not resolve Ipv4 address for host"))]
-    DnsIpv4Error,
+    NoIpv4Addr,
 
     #[snafu(display("could not open ICMP transport: {}", source))]
-    IcmpOpenError { source: PingError },
+    IcmpOpen { source: PingError },
 
     #[snafu(display("could not send echo request: {}", source))]
-    IcmpSendError { source: PingError },
+    IcmpSend { source: PingError },
 
     #[snafu(display("could not recieve icmp response: {}", source))]
-    IcmpRecvError { source: PingError },
+    IcmpRecv { source: PingError },
 }
 
 fn main() {
@@ -66,7 +66,7 @@ fn run_ping(args: Args) -> Result<(), CliError> {
         // The host is a domain, so resolve its IP
         Err(_) => {
             // TODO: gracefully handle failures
-            let addresses = resolve_host(&args.host).context(ResolutionError)?;
+            let addresses = resolve_host(&args.host).context(Resolution)?;
 
             // Take the first address.
             let addr: Ipv4Addr = addresses
@@ -75,7 +75,7 @@ fn run_ping(args: Args) -> Result<(), CliError> {
                     _ => None,
                 })
                 .next()
-                .context(DnsIpv4Error)?;
+                .context(NoIpv4Addr)?;
 
             (addr, Some(args.host))
         }
@@ -90,7 +90,7 @@ fn run_ping(args: Args) -> Result<(), CliError> {
     );
 
     // Open the pinger
-    let mut pinger = Pinger::open(args.ttl).context(IcmpOpenError)?;
+    let mut pinger = Pinger::open(args.ttl).context(IcmpOpen)?;
 
     let mut rtt_list: Vec<u128> = Vec::new();
     let mut count_sent: u32 = 0;
@@ -99,9 +99,7 @@ fn run_ping(args: Args) -> Result<(), CliError> {
     for seq in 0..args.count {
         let sent_time = Instant::now();
         count_sent += 1;
-        pinger
-            .send(host_ip, seq, &[42; 56])
-            .context(IcmpSendError)?;
+        pinger.send(host_ip, seq, &[42; 56]).context(IcmpSend)?;
 
         let response = pinger.recv(Duration::from_millis(args.timeout));
 
@@ -135,7 +133,7 @@ fn run_ping(args: Args) -> Result<(), CliError> {
 
             Ok(Reply::Timeout) => println!("Request timed out."),
 
-            Err(err) => return Err(CliError::IcmpRecvError { source: err }),
+            Err(err) => return Err(CliError::IcmpRecv { source: err }),
         }
 
         sleep(Duration::from_secs(1));
